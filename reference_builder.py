@@ -25,7 +25,7 @@ class SuggestedPaper:
 class ReferenceBuilder:
     def __init__(self):
         self.client = OpenAI()
-        self.results_dir = Path("search_results")
+        self.results_dir = Path("results")
         self.results_dir.mkdir(exist_ok=True)
     
     def get_suggested_papers(self, text: str) -> List[SuggestedPaper]:
@@ -111,41 +111,56 @@ Relevance: <brief explanation of why this paper is relevant>
                 f"[bold]Arxiv URL:[/] {paper.arxiv_url if paper.arxiv_url else 'Unknown'}"
             ))
         
-        self.save_phase_results("phase1_suggestions", {"papers": [vars(p) for p in suggestions]})
         return suggestions
     
-    def validate_on_arxiv(self, suggestions: List[SuggestedPaper]) -> List[SuggestedPaper]:
+    def validate_by_arxiv_url(self, suggestions: List[SuggestedPaper]) -> List[SuggestedPaper]:
         """Phase 2: Check which suggested papers exist on arXiv and get their details."""
         console.print("\n[bold green]Phase 2: Validating papers on arXiv...[/]")
         
         validated_papers = []
         for paper in suggestions:
-            # Search by title
-            console.print(f"\n[blue]Searching for: [italic]{paper.title}[/]")
-            search = arxiv.Search(
-                query=f'ti:"{paper.title}"',
-                max_results=1
-            )
+            console.print(f"\n[blue]Validating: [italic]{paper.title}[/]")
             
-            try:
-                results = list(arxiv.Client().results(search))
-                if results:
-                    result = results[0]
-                    paper.arxiv_id = result.entry_id
-                    paper.pdf_url = result.pdf_url
-                    paper.abstract = result.summary
-                    paper.authors = [a.name for a in result.authors]
-                    paper.year = result.published.year if result.published else paper.year
-                    validated_papers.append(paper)
-                    console.print("[green]Found on arXiv!")
-                else:
-                    console.print("[yellow]Not found on arXiv")
-            except Exception as e:
-                console.print(f"[red]Search error: {str(e)}[/]")
+            # First try by URL if available
+            validated = False
+            if paper.arxiv_url:
+                try:
+                    arxiv_id = paper.arxiv_url.split('/')[-1]
+                    if 'arxiv.org' in paper.arxiv_url and arxiv_id:
+                        search = arxiv.Search(id_list=[arxiv_id])
+                        results = list(arxiv.Client().results(search))
+                        
+                        if results and self._titles_match(paper.title, results[0].title):
+                            result = results[0]
+                            paper.arxiv_id = result.entry_id
+                            paper.pdf_url = result.pdf_url
+                            paper.abstract = result.summary
+                            paper.authors = [a.name for a in result.authors]
+                            paper.year = result.published.year if result.published else paper.year
+                            validated_papers.append(paper)
+                            validated = True
+                            console.print("[green]Successfully validated by arXiv URL!")
+                except Exception as e:
+                    console.print(f"[yellow]URL validation failed: {str(e)}")
+            
+            # If URL validation failed, try finding by title
+            if not validated:
+                console.print(f"[blue]Attempting to find paper by title... {paper.title}")
+                found_paper = self.find_by_title(paper)
+                if found_paper:
+                    validated_papers.append(found_paper)
         
         console.print(f"\n[bold blue]Validated {len(validated_papers)} papers on arXiv[/]")
         self.save_phase_results("phase2_validated", {"papers": [vars(p) for p in validated_papers]})
         return validated_papers
+    
+    def _titles_match(self, title1: str, title2: str) -> bool:
+        """Compare two titles, ignoring case and punctuation."""
+        import re
+        def normalize(title: str) -> str:
+            return re.sub(r'[^\w\s]', '', title.lower())
+        
+        return normalize(title1) == normalize(title2)
     
     def expand_by_key_authors(self, validated_papers: List[SuggestedPaper], original_text: str) -> List[Dict]:
         """Phase 3: Find additional papers from key authors and combine with validated papers."""
@@ -311,6 +326,52 @@ Available Papers and their citation keys:
         
         return response.choices[0].message.content.strip()
 
+    def load_phase_results(self, phase: str) -> dict:
+        """Load results from a previous phase's JSON file."""
+        input_file = self.results_dir / f"{phase}.json"
+        if not input_file.exists():
+            raise FileNotFoundError(f"No saved results found for {phase}")
+        
+        with open(input_file, 'r') as f:
+            data = json.load(f)
+        
+        # Convert dict back to SuggestedPaper objects if loading phase1
+        if phase == "phase1_suggestions":
+            data["papers"] = [SuggestedPaper(**p) for p in data["papers"]]
+        
+        return data
+
+    def find_by_title(self, paper: SuggestedPaper) -> Optional[SuggestedPaper]:
+        """Search for a paper by title on arXiv and validate the match."""
+        try:
+            # Clean and format the title for search
+            search_title = paper.title.replace(':', ' ').replace('-', ' ')
+            search = arxiv.Search(
+                query=f'ti:"{search_title}"',
+                max_results=5,
+                sort_by=arxiv.SortCriterion.Relevance
+            )
+            
+            results = list(arxiv.Client().results(search))
+            
+            for result in results:
+                if self._titles_match(paper.title, result.title):
+                    paper.arxiv_id = result.entry_id
+                    paper.pdf_url = result.pdf_url
+                    paper.abstract = result.summary
+                    paper.authors = [a.name for a in result.authors]
+                    paper.year = result.published.year if result.published else paper.year
+                    paper.arxiv_url = f"https://arxiv.org/abs/{result.entry_id.split('/')[-1]}"
+                    console.print("[green]Found matching paper by title!")
+                    return paper
+                
+            console.print("[yellow]No matching paper found by title")
+            return None
+            
+        except Exception as e:
+            console.print(f"[red]Title search error: {str(e)}[/]")
+            return None
+
 def main():
     builder = ReferenceBuilder()
     
@@ -322,11 +383,18 @@ def main():
         console.print("\n[bold red]Input error. Exiting.[/]")
         sys.exit(1)
     
-    # Phase 1: Get paper suggestions from GPT
-    suggested_papers = builder.get_suggested_papers(text)
+
+    # # Run phase 1 if no saved results
+    # suggested_papers = builder.get_suggested_papers(text)
+    # builder.save_phase_results("phase1_suggestions", {"papers": [vars(p) for p in suggested_papers]})
+    
+    # Try to load phase 1 results
+    data = builder.load_phase_results("phase1_suggestions")
+    suggested_papers = data["papers"]
+    console.print("[bold green]Loaded saved results from phase 1[/]")
     
     # Phase 2: Validate papers on arXiv
-    validated_papers = builder.validate_on_arxiv(suggested_papers)
+    validated_papers = builder.validate_by_arxiv_url(suggested_papers)
     if not validated_papers:
         console.print("\n[bold red]No suggested papers found on arXiv.[/]")
         sys.exit(0)

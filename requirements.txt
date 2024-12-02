@@ -1,0 +1,6 @@
+openai>=1.0.0
+arxiv>=1.4.8
+scholarly>=1.7.11
+python-dotenv>=1.0.0
+requests>=2.31.0
+rich>=13.7.0

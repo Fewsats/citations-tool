@@ -21,6 +21,7 @@ class SuggestedPaper:
     arxiv_url: Optional[str] = None
     pdf_url: Optional[str] = None
     abstract: Optional[str] = None
+    arxiv_id: Optional[str] = None
     
 class ReferenceBuilder:
     def __init__(self):
@@ -151,7 +152,6 @@ Relevance: <brief explanation of why this paper is relevant>
                     validated_papers.append(found_paper)
         
         console.print(f"\n[bold blue]Validated {len(validated_papers)} papers on arXiv[/]")
-        self.save_phase_results("phase2_validated", {"papers": [vars(p) for p in validated_papers]})
         return validated_papers
     
     def _titles_match(self, title1: str, title2: str) -> bool:
@@ -235,14 +235,14 @@ Return just the names, one per line."""},
             response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": """Select the most relevant papers for the research context.
-Consider:
-1. Direct relevance to the technical concepts and methodologies
-2. Balance between foundational papers and recent developments
-3. Significance of contributions to the field
-4. Complementary perspectives and approaches
+                    {"role": "system", "content": """Review the papers and identify which ones are most relevant for citation.
+For each relevant paper, explain why it should be cited in relation to the research context.
 
-Return paper URLs in order of relevance, one per line."""},
+Format your response as:
+PAPER: <arxiv_url>
+REASON: <detailed explanation of relevance>
+
+Only include papers that are truly relevant."""},
                     {"role": "user", "content": f"""Original Text:
 {original_text}
 
@@ -251,8 +251,41 @@ Papers to Consider:
                 ]
             )
             
-            selected_urls = [url.strip() for url in response.choices[0].message.content.strip().split('\n')]
-            final_papers = [p for p in unique_papers if p['url'] in selected_urls]
+            # Parse structured response
+            selected_papers = []
+            current_paper = {}
+            print(response.choices[0].message.content.strip().split('\n'))    
+            for line in response.choices[0].message.content.strip().split('\n'):
+                line = line.strip()
+                if line.startswith('PAPER:'):
+                    if current_paper.get('url'):
+                        selected_papers.append(current_paper)
+                    current_paper = {'url': line[6:].strip()}
+                elif line.startswith('REASON:'):
+                    current_paper['reason'] = line[7:].strip()
+            
+            # Add the last paper if exists
+            if current_paper.get('url'):
+                selected_papers.append(current_paper)
+            
+            # Get final papers with their metadata
+            final_papers = []
+            for selection in selected_papers:
+                paper = next((p for p in unique_papers if p['url'] == selection['url']), None)
+                if paper:
+                    paper['selection_reason'] = selection['reason']
+                    final_papers.append(paper)
+                    console.print(Panel(
+                        f"[bold cyan]Selected Paper[/]\n\n"
+                        f"[bold white]Title:[/] {paper['title']}\n\n"
+                        f"[bold white]Authors:[/] {', '.join(paper['authors'])}\n"
+                        f"[bold white]Year:[/] {paper.get('year', 'N/A')}\n\n"
+                        f"[bold yellow]Relevance:[/]\n{selection['reason']}",
+                        border_style="cyan",
+                        padding=(1, 2),
+                        title="[bold cyan]Citation Suggestion[/]",
+                        expand=True
+                    ))
         else:
             final_papers = []
         
@@ -304,8 +337,17 @@ Papers to Consider:
         """Suggest where to add citations in the text."""
         console.print("\n[bold green]Suggesting citations...[/]")
         
-        # Create a mapping of papers to their citation keys
-        citation_keys = {p['title']: key for p, (key, _) in zip(papers, bibtex_entries)}
+        # Create a mapping of papers to their citation keys and details
+        paper_details = []
+        for paper, (key, _) in zip(papers, bibtex_entries):
+            details = {
+                'key': key,
+                'title': paper['title'],
+                'abstract': paper['abstract'],
+                'reason': paper.get('selection_reason', 'No reason provided'),
+                'year': paper.get('year', 'N/A')
+            }
+            paper_details.append(details)
         
         # Ask GPT to suggest citation placements
         response = self.client.chat.completions.create(
@@ -313,14 +355,22 @@ Papers to Consider:
             messages=[
                 {"role": "system", "content": """Add LaTeX citations to the text where appropriate.
 Use \\cite{key} format for citations.
-Available citation keys are provided in the papers list.
+Consider each paper's abstract and relevance when deciding where to place citations.
 Add citations at the end of relevant sentences.
-Multiple papers can be cited together using \\cite{key1,key2}."""},
+Multiple papers can be cited together using \\cite{key1,key2} when they support the same point.
+Be precise in citation placement - only cite papers where they directly support the text."""},
                 {"role": "user", "content": f"""Text to add citations to:
 {text}
 
-Available Papers and their citation keys:
-{chr(10).join([f"- {p['title']}: {citation_keys[p['title']]}" for p in papers])}"""}
+Available Papers:
+{chr(10).join([
+    f"Citation Key: {p['key']}\n"
+    f"Title: {p['title']}\n"
+    f"Year: {p['year']}\n"
+    f"Abstract: {p['abstract']}\n"
+    f"Relevance: {p['reason']}\n"
+    for p in paper_details
+])}"""}
             ]
         )
         
@@ -335,8 +385,8 @@ Available Papers and their citation keys:
         with open(input_file, 'r') as f:
             data = json.load(f)
         
-        # Convert dict back to SuggestedPaper objects if loading phase1
-        if phase == "phase1_suggestions":
+        # Convert dict back to SuggestedPaper objects if loading phase1 or phase2
+        if phase in ["phase1_suggestions", "phase2_validated"]:
             data["papers"] = [SuggestedPaper(**p) for p in data["papers"]]
         
         return data
@@ -384,21 +434,27 @@ def main():
         sys.exit(1)
     
 
-    # # Run phase 1 if no saved results
-    # suggested_papers = builder.get_suggested_papers(text)
-    # builder.save_phase_results("phase1_suggestions", {"papers": [vars(p) for p in suggested_papers]})
+    # # Run Phase 1
+    suggested_papers = builder.get_suggested_papers(text)
+    builder.save_phase_results("phase1_suggestions", {"papers": [vars(p) for p in suggested_papers]})
     
     # Try to load phase 1 results
-    data = builder.load_phase_results("phase1_suggestions")
-    suggested_papers = data["papers"]
-    console.print("[bold green]Loaded saved results from phase 1[/]")
+    # data = builder.load_phase_results("phase1_suggestions")
+    # suggested_papers = data["papers"]
+    # console.print("[bold green]Loaded saved results from phase 1[/]")
     
-    # Phase 2: Validate papers on arXiv
+    # # Phase 2: Validate papers on arXiv
     validated_papers = builder.validate_by_arxiv_url(suggested_papers)
     if not validated_papers:
         console.print("\n[bold red]No suggested papers found on arXiv.[/]")
         sys.exit(0)
-    
+    builder.save_phase_results("phase2_validated", {"papers": [vars(p) for p in validated_papers]})
+
+    # Try to load phase 2 results
+    # data = builder.load_phase_results("phase2_validated")
+    # validated_papers = [SuggestedPaper(**p) if isinstance(p, dict) else p for p in data["papers"]]
+    # console.print("[bold green]Loaded saved results from phase 2[/]")
+
     # Phase 3: Expand by key authors and combine with initial papers
     final_papers = builder.expand_by_key_authors(validated_papers, text)
     

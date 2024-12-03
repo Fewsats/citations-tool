@@ -40,7 +40,6 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
             detail="Invalid authentication token"
         )
     return credentials.credentials
-    return credentials.credentials
 
 @app.get("/")
 def read_root():
@@ -56,7 +55,6 @@ def read_root():
     return {
         "description": "POST - Get citations for a text paragraph"
     }
-
 
 @app.post("/citations/", response_model=CitationResponse)
 async def get_citations(

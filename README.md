@@ -64,6 +64,39 @@ Process all paragraphs at once (note: this might be unstable):
 python process_paragraphs.py path/to/paper.paragraphs
 ```
 
+### 3. API Usage
+
+The service is also available via a REST API endpoint:
+
+```bash
+curl -X POST http://localhost:8000/citations/ \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer default-token" \
+  -d '{
+    "text": "Your paragraph text here that needs citations"
+  }'
+```
+
+Example response:
+
+```json
+{
+  "cited_text": "Your paragraph text here that needs citations \\cite{Smith2023,Jones2022}",
+  "bibtex_entries": [
+    "@article{Smith2023,\n  title={{Example Paper Title}},\n  author={John Smith},\n  year={2023},\n  eprint={2301.00000},\n  archivePrefix={arXiv},\n  primaryClass={cs.CR},\n  url={https://arxiv.org/abs/2301.00000}\n}",
+    "@article{Jones2022,...}"
+  ]
+}
+```
+
+To start the API server:
+
+```bash
+uvicorn api:app --reload
+```
+
+The API will be available at `http://localhost:8000`. You can also access the interactive API documentation at `http://localhost:8000/docs`.
+
 ### Output Files
 
 The `results/` directory will contain:

@@ -1,0 +1,9 @@
+modules = ["python-3.12"]
+run = "uvicorn main:app --reload"
+
+[nix]
+channel = "stable-24_05"
+
+[deployment]
+run = ["sh", "-c", "uvicorn main:app --reload"]
+deploymentTarget = "cloudrun"

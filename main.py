@@ -51,7 +51,7 @@ def read_root():
     }
 
 @app.get("/citations")
-def read_root():
+def read_citations():
     return {
         "description": "POST - Get citations for a text paragraph"
     }
